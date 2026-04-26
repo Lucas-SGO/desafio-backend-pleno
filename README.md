@@ -194,6 +194,17 @@ just k6   # requer k6 instalado
 
 20 VUs por 30 segundos — thresholds: p95 < 500ms, error rate < 1%.
 
+### Testes em Python
+
+Além da suite Go, há um script Python que exercita todos os fluxos contra o servidor rodando:
+
+```bash
+pip install requests websockets
+python test_api.py
+```
+
+Cobre: `GET /healthz`, webhook válido/duplicado/assinatura inválida, listagem com cursor, unread-count, mark-read, token inválido e conexão WebSocket.
+
 ---
 
 ## Kubernetes
