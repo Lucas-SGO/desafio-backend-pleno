@@ -24,8 +24,10 @@ func (s *Service) CreateFromWebhook(ctx context.Context, cpfHash, eventHash stri
 		return nil, err
 	}
 
-	payload, _ := json.Marshal(n)
-	s.redis.Publish(ctx, fmt.Sprintf("notifications:%s", cpfHash), payload)
+	if s.redis != nil {
+		payload, _ := json.Marshal(n)
+		s.redis.Publish(ctx, fmt.Sprintf("notifications:%s", cpfHash), payload)
+	}
 
 	return n, nil
 }
