@@ -40,6 +40,10 @@ func main() {
 	webhookGroup := router.Group("/webhook", middleware.WebhookSignature(cfg.WebhookSecret))
 	webhook.NewHandler(svc, cfg.CPFHMACSecret).Register(webhookGroup)
 
+	jwtMW := middleware.BearerJWT(cfg.JWTSecret, cfg.CPFHMACSecret)
+	notifGroup := router.Group("/notifications", jwtMW)
+	notification.NewHandler(repo).Register(notifGroup)
+
 	if err := router.Run(":" + cfg.Port); err != nil {
 		log.Fatalf("server: %v", err)
 	}
