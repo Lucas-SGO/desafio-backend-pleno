@@ -17,6 +17,9 @@ var ErrNotFound = errors.New("notification not found")
 type Repository interface {
 	CreateFromEvent(ctx context.Context, cpfHash, eventHash string, p domain.WebhookPayload) (*domain.Notification, error)
 	List(ctx context.Context, cpfHash string, limit, offset int) ([]domain.Notification, int, error)
+	// ListCursor returns up to limit items before the given cursor position.
+	// cursor="" fetches the first page. Returns nextCursor and hasMore.
+	ListCursor(ctx context.Context, cpfHash string, limit int, cursor string) ([]domain.Notification, string, bool, error)
 	MarkRead(ctx context.Context, id, cpfHash string) error
 	UnreadCount(ctx context.Context, cpfHash string) (int, error)
 }
@@ -90,6 +93,70 @@ func (r *postgresRepository) List(ctx context.Context, cpfHash string, limit, of
 		notifications = append(notifications, n)
 	}
 	return notifications, total, rows.Err()
+}
+
+func (r *postgresRepository) ListCursor(ctx context.Context, cpfHash string, limit int, cursor string) ([]domain.Notification, string, bool, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+
+	// Fetch limit+1 to detect whether there is a next page.
+	fetch := limit + 1
+
+	if cursor == "" {
+		rows, err = r.db.QueryContext(ctx, `
+			SELECT id, chamado_id, titulo, descricao, status_anterior, status_novo, is_read, created_at
+			FROM notifications
+			WHERE cpf_hash = $1
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2`,
+			cpfHash, fetch,
+		)
+	} else {
+		cursorTime, cursorID, decErr := decodeCursor(cursor)
+		if decErr != nil {
+			return nil, "", false, decErr
+		}
+		rows, err = r.db.QueryContext(ctx, `
+			SELECT id, chamado_id, titulo, descricao, status_anterior, status_novo, is_read, created_at
+			FROM notifications
+			WHERE cpf_hash = $1
+			  AND (created_at, id) < ($2::timestamptz, $3::uuid)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $4`,
+			cpfHash, cursorTime, cursorID, fetch,
+		)
+	}
+	if err != nil {
+		return nil, "", false, err
+	}
+	defer rows.Close()
+
+	var items []domain.Notification
+	for rows.Next() {
+		var n domain.Notification
+		if err := rows.Scan(&n.ID, &n.ChamadoID, &n.Titulo, &n.Descricao, &n.StatusAnterior, &n.StatusNovo, &n.IsRead, &n.CreatedAt); err != nil {
+			return nil, "", false, err
+		}
+		items = append(items, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", false, err
+	}
+
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+
+	var nextCursor string
+	if hasMore {
+		last := items[len(items)-1]
+		nextCursor = encodeCursor(last.CreatedAt, last.ID)
+	}
+
+	return items, nextCursor, hasMore, nil
 }
 
 func (r *postgresRepository) MarkRead(ctx context.Context, id, cpfHash string) error {
@@ -166,6 +233,23 @@ func (b *breakeredRepository) List(ctx context.Context, cpfHash string, limit, o
 	}
 	r := result.(listResult)
 	return r.items, r.total, nil
+}
+
+func (b *breakeredRepository) ListCursor(ctx context.Context, cpfHash string, limit int, cursor string) ([]domain.Notification, string, bool, error) {
+	type cursorResult struct {
+		items      []domain.Notification
+		nextCursor string
+		hasMore    bool
+	}
+	result, err := b.breaker.Execute(func() (any, error) {
+		items, next, more, err := b.inner.ListCursor(ctx, cpfHash, limit, cursor)
+		return cursorResult{items, next, more}, err
+	})
+	if err != nil {
+		return nil, "", false, err
+	}
+	r := result.(cursorResult)
+	return r.items, r.nextCursor, r.hasMore, nil
 }
 
 func (b *breakeredRepository) MarkRead(ctx context.Context, id, cpfHash string) error {

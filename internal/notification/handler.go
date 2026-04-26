@@ -27,26 +27,41 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 
 func (h *Handler) list(c *gin.Context) {
 	cpfHash := c.GetString(middleware.CPFHashKey)
-
 	limit := clampInt(c.DefaultQuery("limit", "20"), 1, 100)
-	page := clampInt(c.DefaultQuery("page", "1"), 1, 1<<31-1)
-	offset := (page - 1) * limit
 
-	notifications, total, err := h.repo.List(c.Request.Context(), cpfHash, limit, offset)
+	// Cursor-based pagination when ?cursor= is present; offset otherwise.
+	if cursor := c.Query("cursor"); cursor != "" {
+		items, nextCursor, hasMore, err := h.repo.ListCursor(c.Request.Context(), cpfHash, limit, cursor)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if items == nil {
+			items = []domain.Notification{}
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"data":        items,
+			"next_cursor": nextCursor,
+			"has_more":    hasMore,
+			"limit":       limit,
+		})
+		return
+	}
+
+	// First page via cursor (no cursor param).
+	items, nextCursor, hasMore, err := h.repo.ListCursor(c.Request.Context(), cpfHash, limit, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-
-	if notifications == nil {
-		notifications = []domain.Notification{}
+	if items == nil {
+		items = []domain.Notification{}
 	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"data":  notifications,
-		"total": total,
-		"page":  page,
-		"limit": limit,
+		"data":        items,
+		"next_cursor": nextCursor,
+		"has_more":    hasMore,
+		"limit":       limit,
 	})
 }
 

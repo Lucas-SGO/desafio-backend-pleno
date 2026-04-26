@@ -42,7 +42,10 @@ func (f *fakeRepo) CreateFromEvent(_ context.Context, _, _ string, p domain.Webh
 func (f *fakeRepo) List(_ context.Context, _ string, _, _ int) ([]domain.Notification, int, error) {
 	return nil, 0, nil
 }
-func (f *fakeRepo) MarkRead(_ context.Context, _, _ string) error  { return nil }
+func (f *fakeRepo) ListCursor(_ context.Context, _ string, _ int, _ string) ([]domain.Notification, string, bool, error) {
+	return nil, "", false, nil
+}
+func (f *fakeRepo) MarkRead(_ context.Context, _, _ string) error         { return nil }
 func (f *fakeRepo) UnreadCount(_ context.Context, _ string) (int, error) { return 0, nil }
 
 func buildRouter(repo notification.Repository, repoErr error) *gin.Engine {
