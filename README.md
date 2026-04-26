@@ -217,6 +217,34 @@ Edite `k8s/secret.yaml` com os valores reais antes de aplicar. O Deployment usa 
 
 ---
 
+## O que faria com mais tempo
+
+### RS256 / JWKS
+
+A implementação atual usa HS256 com segredo compartilhado porque o desafio não fornece IDP. Em produção, o correto é buscar a chave pública do IDP em `/jwks.json` na inicialização e validar tokens RS256 — sem segredo compartilhado entre serviços. A troca é cirúrgica: substituir o parser em [`internal/middleware/jwt.go`](internal/middleware/jwt.go) e adicionar refresh periódico do JWKS para suportar rotação de chaves.
+
+### Métricas com Prometheus
+
+OTel traces cobrem latência por requisição, mas faltam métricas agregadas: throughput do webhook, profundidade da DLQ (`dlq:webhook:events`), conexões WebSocket ativas, taxa de circuit breaker aberto. Exporia um `/metrics` com `prometheus/client_golang` e montaria um dashboard Grafana junto ao Jaeger no `docker-compose.yml`.
+
+### Graceful Shutdown
+
+Hoje o servidor fecha abruptamente quando recebe `SIGTERM`. O correto é: parar de aceitar novas conexões, aguardar requests em voo completarem (com deadline), drenar as goroutines do Hub WebSocket e do DLQ worker antes de encerrar. Isso é crítico em rolling deployments no Kubernetes para não derrubar conexões WebSocket ativas.
+
+### Rate Limiting no Webhook
+
+O endpoint `POST /webhook/events` não tem limite de requisições por IP ou por `chamado_id`. Em produção adicionaria um middleware de rate limiting com janela deslizante no Redis — resistente a múltiplas réplicas — para proteger contra abuso ou bug no sistema municipal que gere flood de eventos.
+
+### Testes de Contrato
+
+Os testes de integração garantem que o repositório funciona, mas não que o contrato da API (campos, tipos, status codes) se mantém estável entre deploys. Adicionaria testes de contrato com [Pact](https://pact.io) ou validação de schema OpenAPI gerado automaticamente a partir das structs Go.
+
+### Notificações por Push (FCM / APNs)
+
+WebSocket exige que o usuário esteja com o app aberto. Para alcançar usuários offline, o `Hub` poderia ter um fallback: se não há cliente WS conectado para aquele `cpfHash`, envia push notification via Firebase (Android) ou APNs (iOS). O token de dispositivo seria registrado em uma tabela `device_tokens` vinculada ao `cpfHash`.
+
+---
+
 ## Verificação end-to-end
 
 ```bash
