@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/gin-gonic/gin"
@@ -10,6 +11,7 @@ import (
 	"github.com/lucaseray/desafio-backend-pleno/internal/notification"
 	redisclient "github.com/lucaseray/desafio-backend-pleno/internal/redis"
 	"github.com/lucaseray/desafio-backend-pleno/internal/webhook"
+	"github.com/lucaseray/desafio-backend-pleno/internal/ws"
 )
 
 func main() {
@@ -35,14 +37,21 @@ func main() {
 	repo := notification.NewRepository(database)
 	svc := notification.NewService(repo, rdb)
 
+	hub := ws.NewHub(rdb)
+	go hub.Run(context.Background())
+
 	router := gin.Default()
 
 	webhookGroup := router.Group("/webhook", middleware.WebhookSignature(cfg.WebhookSecret))
 	webhook.NewHandler(svc, cfg.CPFHMACSecret).Register(webhookGroup)
 
 	jwtMW := middleware.BearerJWT(cfg.JWTSecret, cfg.CPFHMACSecret)
+
 	notifGroup := router.Group("/notifications", jwtMW)
 	notification.NewHandler(repo).Register(notifGroup)
+
+	wsGroup := router.Group("/ws", jwtMW)
+	ws.NewHandler(hub).Register(wsGroup)
 
 	if err := router.Run(":" + cfg.Port); err != nil {
 		log.Fatalf("server: %v", err)
