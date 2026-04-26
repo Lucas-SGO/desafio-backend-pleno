@@ -8,8 +8,12 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/sony/gobreaker"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"github.com/lucaseray/desafio-backend-pleno/internal/domain"
 )
+
+var repoTracer = otel.Tracer("notification.repository")
 
 var ErrDuplicateEvent = errors.New("duplicate event")
 var ErrNotFound = errors.New("notification not found")
@@ -33,6 +37,13 @@ func NewRepository(db *sql.DB) Repository {
 }
 
 func (r *postgresRepository) CreateFromEvent(ctx context.Context, cpfHash, eventHash string, p domain.WebhookPayload) (*domain.Notification, error) {
+	ctx, span := repoTracer.Start(ctx, "db.CreateFromEvent")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("db.system", "postgresql"),
+		attribute.String("chamado_id", p.ChamadoID),
+	)
+
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err

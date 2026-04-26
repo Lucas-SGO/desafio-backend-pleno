@@ -12,6 +12,7 @@ type Config struct {
 	WebhookSecret string
 	CPFHMACSecret string
 	JWTSecret     string
+	OTELEndpoint  string
 }
 
 func Load() Config {
@@ -22,6 +23,7 @@ func Load() Config {
 		WebhookSecret: requireEnv("WEBHOOK_SECRET"),
 		CPFHMACSecret: requireEnv("CPF_HMAC_SECRET"),
 		JWTSecret:     os.Getenv("JWT_SECRET"),
+		OTELEndpoint:  os.Getenv("OTEL_ENDPOINT"),
 	}
 	return cfg
 }

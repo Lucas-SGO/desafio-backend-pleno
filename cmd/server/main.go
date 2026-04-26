@@ -6,12 +6,14 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	otelgin "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"github.com/lucaseray/desafio-backend-pleno/internal/config"
 	"github.com/lucaseray/desafio-backend-pleno/internal/db"
 	"github.com/lucaseray/desafio-backend-pleno/internal/dlq"
 	"github.com/lucaseray/desafio-backend-pleno/internal/middleware"
 	"github.com/lucaseray/desafio-backend-pleno/internal/notification"
 	redisclient "github.com/lucaseray/desafio-backend-pleno/internal/redis"
+	"github.com/lucaseray/desafio-backend-pleno/internal/telemetry"
 	"github.com/lucaseray/desafio-backend-pleno/internal/webhook"
 	"github.com/lucaseray/desafio-backend-pleno/internal/ws"
 )
@@ -19,6 +21,12 @@ import (
 func main() {
 	ctx := context.Background()
 	cfg := config.Load()
+
+	shutdown, err := telemetry.Init(ctx, "notificacoes", cfg.OTELEndpoint)
+	if err != nil {
+		log.Fatalf("otel init: %v", err)
+	}
+	defer shutdown(ctx)
 
 	database, err := db.Open(cfg.DatabaseURL)
 	if err != nil {
@@ -48,7 +56,8 @@ func main() {
 	hub := ws.NewHub(rdb)
 	go hub.Run(ctx)
 
-	router := gin.Default()
+	router := gin.New()
+	router.Use(gin.Recovery(), otelgin.Middleware("notificacoes"))
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})

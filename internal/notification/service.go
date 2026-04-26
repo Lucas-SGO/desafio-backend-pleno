@@ -7,9 +7,13 @@ import (
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"github.com/lucaseray/desafio-backend-pleno/internal/dlq"
 	"github.com/lucaseray/desafio-backend-pleno/internal/domain"
 )
+
+var tracer = otel.Tracer("notification.service")
 
 type Service struct {
 	repo      Repository
@@ -22,6 +26,13 @@ func NewService(repo Repository, redis *redis.Client, dlqWorker *dlq.Worker) *Se
 }
 
 func (s *Service) CreateFromWebhook(ctx context.Context, cpfHash, eventHash string, p domain.WebhookPayload) (*domain.Notification, error) {
+	ctx, span := tracer.Start(ctx, "CreateFromWebhook")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("chamado_id", p.ChamadoID),
+		attribute.String("cpf_hash_prefix", cpfHash[:8]),
+	)
+
 	n, err := s.repo.CreateFromEvent(ctx, cpfHash, eventHash, p)
 	if err != nil {
 		if errors.Is(err, ErrDuplicateEvent) {
