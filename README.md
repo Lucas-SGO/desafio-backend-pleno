@@ -6,24 +6,19 @@ Serviço de notificações para cidadãos acompanharem o ciclo de vida dos chama
 
 ## Quick Start
 
+**Requisitos:** Docker, Docker Compose, [just](https://github.com/casey/just)
+
 ```bash
-# Requisitos: Docker, Docker Compose, just
 cp .env.example .env
 just up
 ```
 
-O servidor sobe em `http://localhost:8080`. Postgres e Redis são provisionados automaticamente com healthchecks — o app só inicia após ambos estarem saudáveis.
-
-Para rodar os testes:
+O servidor sobe em `http://localhost:8080`. Postgres, Redis e Jaeger são provisionados automaticamente com healthchecks — o app só inicia após banco e cache estarem saudáveis.
 
 ```bash
-just test
-```
-
-Para enviar um webhook de teste (requer `curl` e `openssl`):
-
-```bash
-just seed
+just seed    # envia um webhook de teste com HMAC válido
+just test    # roda toda a suite de testes
+just k6      # load test (requer k6 instalado)
 ```
 
 ---
@@ -45,20 +40,43 @@ X-Signature-256: sha256=<HMAC-SHA256 do body com WEBHOOK_SECRET>
 | `401` | Assinatura ausente ou inválida |
 | `400` | Campos obrigatórios ausentes |
 
+Payload esperado:
+```json
+{
+  "chamado_id":      "CH-2024-001234",
+  "tipo":            "status_change",
+  "cpf":             "12345678901",
+  "status_anterior": "em_analise",
+  "status_novo":     "em_execucao",
+  "titulo":          "Buraco na Rua",
+  "descricao":       "Equipe designada para reparo",
+  "timestamp":       "2024-11-15T14:30:00Z"
+}
+```
+
 ### REST API (app → serviço)
 
 Todas as rotas exigem `Authorization: Bearer <JWT>` com `preferred_username` = CPF do cidadão.
 
 ```
-GET  /notifications?page=1&limit=20
+GET  /notifications?limit=20
+GET  /notifications?limit=20&cursor=<token>
 GET  /notifications/unread-count
 PATCH /notifications/:id/read
+GET  /healthz
 ```
 
 Resposta do `GET /notifications`:
 ```json
-{ "data": [...], "total": 42, "page": 1, "limit": 20 }
+{
+  "data": [...],
+  "next_cursor": "eyJjcmVhdGVkX2F0IjoiMjAyNC0xMS0xNVQxNDozMDowMFoiLCJpZCI6Ii4uLiJ9",
+  "has_more": true,
+  "limit": 20
+}
 ```
+
+A paginação é baseada em cursor keyset `(created_at, id)` — sem `COUNT(*)`, custo constante independente do tamanho da tabela. Passe `next_cursor` da resposta anterior para buscar a próxima página.
 
 ### WebSocket
 
@@ -76,62 +94,7 @@ Usando [jwt.io](https://jwt.io) ou qualquer ferramenta HS256:
 
 - Algorithm: `HS256`
 - Secret: valor de `JWT_SECRET` (em dev, qualquer valor; assinatura é ignorada quando vazio)
-- Payload: `{ "preferred_username": "12345678901", "exp": <futuro> }`
-
----
-
-## Decisões de Arquitetura
-
-### Privacidade do CPF
-
-O CPF **nunca** é armazenado em texto plano no banco. Antes de qualquer operação, o CPF é transformado em `HMAC-SHA256(cpf, CPF_HMAC_SECRET)`.
-
-A escolha de HMAC sobre SHA-256 simples é proposital: sem a chave secreta, ataques de dicionário sobre o conjunto finito de CPFs brasileiros válidos (~100M) são inviáveis. O hash é determinístico, o que permite lookups sem guardar o CPF.
-
-Toda a lógica de privacidade está em [`internal/crypto/cpf.go`](internal/crypto/cpf.go) e é chamada em exatamente dois lugares: no handler do webhook e no middleware JWT.
-
-### Idempotência do Webhook
-
-A tabela `event_log` tem chave primária no hash do evento (`SHA256(chamado_id|tipo|timestamp)`). O handler executa uma transação que insere primeiro no `event_log` e depois em `notifications`. Um segundo envio do mesmo evento gera violação de PK (PG code `23505`), convertida em `ErrDuplicateEvent` → HTTP 200 sem efeito colateral. A transação garante consistência entre as duas tabelas.
-
-### Bridge Webhook → WebSocket via Redis Pub/Sub
-
-Após salvar no banco, o handler publica em `notifications:{cpfHash}`. O `Hub` mantém uma única conexão `PSUBSCRIBE notifications:*` com o Redis, extrai o `cpfHash` do canal e despacha para os clientes conectados daquele cidadão.
-
-Vantagens: uma conexão Redis para N clientes WebSocket; funciona com múltiplas réplicas da aplicação; a entrega WebSocket é best-effort — o REST API é a fonte autoritativa.
-
-### JWT
-
-O desafio não fornece chave pública ou JWKS. A implementação usa HS256 com `JWT_SECRET` configurável. Quando vazio (padrão em dev), a verificação de assinatura é ignorada — o token ainda é parseado e `preferred_username` é extraído. Para upgrade a RS256/JWKS, basta trocar `parseSigned` em [`internal/middleware/jwt.go`](internal/middleware/jwt.go).
-
-### Auth no WebSocket
-
-O upgrade de WebSocket é um GET; browsers não permitem headers customizados no handshake. O middleware aceita o token tanto em `Authorization: Bearer` quanto em `?token=` query param.
-
-### Ownership nas queries
-
-Toda query inclui `AND cpf_hash = $N`. Mesmo com um bug no middleware JWT, a query não vaza dados de outro cidadão — defesa em profundidade.
-
----
-
-## Estrutura do Projeto
-
-```
-cmd/server/               entry point e wiring de componentes
-internal/
-  config/                 carregamento de env vars com fail-fast
-  crypto/                 CPFHash — única fonte de verdade
-  db/                     conexão Postgres + migrations embarcadas (embed.FS)
-  domain/                 tipos puros: WebhookPayload, Notification
-  middleware/             BearerJWT, WebhookSignature
-  notification/           repository (SQL), service, handler HTTP
-  redis/                  cliente Redis
-  webhook/                handler POST /webhook/events
-  ws/                     Hub, Client, handler WS /ws
-internal/db/migrations/   SQL embarcado no binário via embed.FS
-scripts/                  seed_webhook.sh
-k6/                       load test
-```
+- Payload: `{ "preferred_username": "12345678901", "exp": <timestamp futuro> }`
 
 ---
 
@@ -142,9 +105,74 @@ k6/                       load test
 | `APP_PORT` | não (default `8080`) | Porta HTTP |
 | `DATABASE_URL` | sim | String de conexão PostgreSQL |
 | `REDIS_URL` | sim | URL Redis |
-| `WEBHOOK_SECRET` | sim | Chave HMAC para X-Signature-256 |
-| `CPF_HMAC_SECRET` | sim | Chave HMAC para hash do CPF |
-| `JWT_SECRET` | não (default `""`) | Chave HS256; vazio = skip verificação |
+| `WEBHOOK_SECRET` | sim | Chave HMAC para validar X-Signature-256 |
+| `CPF_HMAC_SECRET` | sim | Chave HMAC para hash irreversível do CPF |
+| `JWT_SECRET` | não (default `""`) | Chave HS256; vazio = skip verificação (dev) |
+| `OTEL_ENDPOINT` | não | Endpoint OTLP gRPC, ex: `jaeger:4317`; vazio = tracing desativado |
+
+---
+
+## Arquitetura
+
+### Privacidade do CPF
+
+O CPF **nunca** é armazenado em texto plano. Antes de qualquer operação é transformado em `HMAC-SHA256(cpf, CPF_HMAC_SECRET)`. HMAC sobre SHA-256 simples porque o espaço de CPFs válidos é finito (~100M) — sem a chave secreta, ataques de dicionário são inviáveis. O hash é determinístico, permitindo lookups sem guardar o CPF. Toda a lógica está em [`internal/crypto/cpf.go`](internal/crypto/cpf.go) e é chamada em exatamente dois lugares: handler webhook e middleware JWT.
+
+### Idempotência do Webhook
+
+A tabela `event_log` tem chave primária no hash do evento (`SHA256(chamado_id|tipo|timestamp)`). O handler executa uma transação que insere primeiro no `event_log` e depois em `notifications`. Um segundo envio gera violação de PK (PG `23505`), convertida em `ErrDuplicateEvent` → HTTP 200 sem efeito colateral. A transação garante atomicidade entre as duas tabelas.
+
+### Bridge Webhook → WebSocket via Redis Pub/Sub
+
+Após salvar no banco, o handler publica em `notifications:{cpfHash}`. O Hub mantém uma única conexão `PSUBSCRIBE notifications:*` com o Redis, extrai o `cpfHash` do canal e despacha para os clientes WebSocket daquele cidadão. Funciona com múltiplas réplicas da aplicação sem nenhuma coordenação adicional.
+
+### Dead Letter Queue
+
+Falhas transientes de persistência não perdem o evento. O `Service` enfileira o payload em `dlq:webhook:events` (Redis LIST). Um worker goroutine consome com `BRPOP`, retenta com backoff exponencial (`2^retries` segundos) e, após 3 falhas, move para `dlq:webhook:dead` para inspeção manual. Duplicatas detectadas durante o reprocessamento são descartadas silenciosamente.
+
+### Circuit Breaker
+
+`breakeredRepository` decora o repositório Postgres com `sony/gobreaker`. Após 5 falhas consecutivas o breaker abre por 30 segundos, rejeitando chamadas imediatamente em vez de acumular goroutines aguardando timeout de conexão. O padrão decorator não altera a interface `Repository` — zero mudança nos callers.
+
+### Paginação por Cursor
+
+`GET /notifications` usa keyset pagination sobre `(created_at DESC, id DESC)`. O cursor é `base64url(timestamp|uuid)` do último item retornado. A query usa `WHERE (created_at, id) < ($ts, $id)` aproveitando o índice composto — custo constante independente do offset, sem `COUNT(*)`.
+
+### OpenTelemetry + Jaeger
+
+Traces distribuídos do handler HTTP até o SQL e o `redis.Publish`. Quando `OTEL_ENDPOINT` está vazio (dev sem Jaeger), o tracer é no-op sem nenhum custo. Com `just up`, a UI do Jaeger fica disponível em `http://localhost:16686`.
+
+### JWT
+
+O desafio não fornece JWKS. A implementação usa HS256 com `JWT_SECRET` configurável. Quando vazio, a assinatura é ignorada e `preferred_username` é extraído normalmente — adequado para dev. Para upgrade a RS256/JWKS, basta substituir o parser em [`internal/middleware/jwt.go`](internal/middleware/jwt.go).
+
+### Ownership nas queries
+
+Toda query ao banco inclui `AND cpf_hash = $N`. Mesmo com um bug no middleware JWT, a query não vaza dados de outro cidadão — defesa em profundidade.
+
+---
+
+## Estrutura do Projeto
+
+```
+cmd/server/               entry point e wiring de todos os componentes
+internal/
+  config/                 carregamento de env vars com fail-fast
+  crypto/                 CPFHash — única fonte de verdade do hash do CPF
+  db/                     conexão Postgres + migrations embarcadas (embed.FS)
+  dlq/                    Dead Letter Queue — worker BRPOP + backoff exponencial
+  domain/                 tipos puros: WebhookPayload, Notification
+  middleware/             BearerJWT, WebhookSignature
+  notification/           repository (SQL), service, handler HTTP
+  redis/                  cliente Redis
+  telemetry/              inicialização do TracerProvider OTLP
+  webhook/                handler POST /webhook/events
+  ws/                     Hub, Client, handler WS /ws
+internal/db/migrations/   SQL embarcado no binário via embed.FS
+k8s/                      manifests Kubernetes (Namespace, Deployment, Service, HPA)
+scripts/                  seed_webhook.ps1
+k6/                       load test
+```
 
 ---
 
@@ -156,7 +184,7 @@ Testes unitários rodam sem dependências externas. Testes de integração do re
 just test   # sobe postgres + redis via docker compose e roda go test ./...
 ```
 
-Cada teste de integração cria um schema isolado (`test_<timestamp>`) e remove ao final via `DROP SCHEMA CASCADE`.
+Cada teste de integração cria um schema isolado (`test_<timestamp>`) e faz `DROP SCHEMA CASCADE` ao final.
 
 ### Load Test (k6)
 
@@ -168,15 +196,31 @@ just k6   # requer k6 instalado
 
 ---
 
-## O que faria com mais tempo
+## Kubernetes
 
-- **RS256 / JWKS**: buscar a chave pública do IDP em `/jwks.json` na inicialização com suporte a rotação de chaves.
-- **Dead Letter Queue**: eventos com falha de persistência iriam para uma fila Redis e seriam reprocessados por um worker separado.
-- **Circuit Breaker**: proteger chamadas ao banco e ao Redis com `sony/gobreaker` para degradação graciosa.
-- **OpenTelemetry**: traces do webhook até o WebSocket, exportados para Jaeger.
-- **Paginação por cursor**: offset degrada em tabelas grandes; cursor-based (por `created_at + id`) é mais adequado para produção.
-- **Kubernetes manifests**: Deployment, Service, HPA baseado em conexões WebSocket ativas.
+```bash
+kubectl apply -f k8s/
+```
+
+Edite `k8s/secret.yaml` com os valores reais antes de aplicar. O Deployment usa liveness/readiness probes em `/healthz`, começa com 2 réplicas e o HPA escala até 10 baseado em CPU (70% de utilização média).
 
 ---
 
-Dúvidas: **selecao.pcrj@gmail.com**
+## Verificação end-to-end
+
+```bash
+just up          # sobe postgres, redis, jaeger e a aplicação
+
+just seed        # envia webhook com HMAC válido → deve retornar 201
+
+# Gerar JWT em jwt.io (HS256, preferred_username=12345678901)
+curl -H "Authorization: Bearer <token>" localhost:8080/notifications
+curl -H "Authorization: Bearer <token>" localhost:8080/notifications/unread-count
+
+# WebSocket em tempo real
+wscat -c "ws://localhost:8080/ws?token=<token>"
+# em outro terminal: just seed → a notificação chega no wscat
+
+# Traces no Jaeger
+open http://localhost:16686   # buscar serviço "notificacoes"
+```
