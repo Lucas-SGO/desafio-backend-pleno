@@ -3,9 +3,13 @@ package main
 import (
 	"log"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lucaseray/desafio-backend-pleno/internal/config"
 	"github.com/lucaseray/desafio-backend-pleno/internal/db"
+	"github.com/lucaseray/desafio-backend-pleno/internal/middleware"
+	"github.com/lucaseray/desafio-backend-pleno/internal/notification"
 	redisclient "github.com/lucaseray/desafio-backend-pleno/internal/redis"
+	"github.com/lucaseray/desafio-backend-pleno/internal/webhook"
 )
 
 func main() {
@@ -22,11 +26,21 @@ func main() {
 	}
 	log.Println("migrations applied")
 
-	_, err = redisclient.New(cfg.RedisURL)
+	rdb, err := redisclient.New(cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("connect to redis: %v", err)
 	}
 	log.Println("redis connected")
 
-	log.Printf("server starting on port %s", cfg.Port)
+	repo := notification.NewRepository(database)
+	svc := notification.NewService(repo, rdb)
+
+	router := gin.Default()
+
+	webhookGroup := router.Group("/webhook", middleware.WebhookSignature(cfg.WebhookSecret))
+	webhook.NewHandler(svc, cfg.CPFHMACSecret).Register(webhookGroup)
+
+	if err := router.Run(":" + cfg.Port); err != nil {
+		log.Fatalf("server: %v", err)
+	}
 }
