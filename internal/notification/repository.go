@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/lib/pq"
+	"github.com/sony/gobreaker"
 	"github.com/lucaseray/desafio-backend-pleno/internal/domain"
 )
 
@@ -115,4 +117,71 @@ func (r *postgresRepository) UnreadCount(ctx context.Context, cpfHash string) (i
 		cpfHash,
 	).Scan(&count)
 	return count, err
+}
+
+// breakeredRepository wraps a Repository with a circuit breaker.
+// After 5 consecutive failures the breaker opens for 30s, rejecting calls
+// immediately instead of waiting for connection timeouts.
+type breakeredRepository struct {
+	inner   Repository
+	breaker *gobreaker.CircuitBreaker
+}
+
+// NewBreakeredRepository decorates inner with a circuit breaker. The underlying
+// Repository interface is unchanged — callers need no modification.
+func NewBreakeredRepository(inner Repository) Repository {
+	cb := gobreaker.NewCircuitBreaker(gobreaker.Settings{
+		Name:        "postgres",
+		MaxRequests: 1,
+		Interval:    30 * time.Second,
+		Timeout:     30 * time.Second,
+		ReadyToTrip: func(c gobreaker.Counts) bool {
+			return c.ConsecutiveFailures >= 5
+		},
+	})
+	return &breakeredRepository{inner: inner, breaker: cb}
+}
+
+func (b *breakeredRepository) CreateFromEvent(ctx context.Context, cpfHash, eventHash string, p domain.WebhookPayload) (*domain.Notification, error) {
+	result, err := b.breaker.Execute(func() (any, error) {
+		return b.inner.CreateFromEvent(ctx, cpfHash, eventHash, p)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*domain.Notification), nil
+}
+
+func (b *breakeredRepository) List(ctx context.Context, cpfHash string, limit, offset int) ([]domain.Notification, int, error) {
+	type listResult struct {
+		items []domain.Notification
+		total int
+	}
+	result, err := b.breaker.Execute(func() (any, error) {
+		items, total, err := b.inner.List(ctx, cpfHash, limit, offset)
+		return listResult{items, total}, err
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	r := result.(listResult)
+	return r.items, r.total, nil
+}
+
+func (b *breakeredRepository) MarkRead(ctx context.Context, id, cpfHash string) error {
+	_, err := b.breaker.Execute(func() (any, error) {
+		return nil, b.inner.MarkRead(ctx, id, cpfHash)
+	})
+	return err
+}
+
+func (b *breakeredRepository) UnreadCount(ctx context.Context, cpfHash string) (int, error) {
+	result, err := b.breaker.Execute(func() (any, error) {
+		count, err := b.inner.UnreadCount(ctx, cpfHash)
+		return count, err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return result.(int), nil
 }

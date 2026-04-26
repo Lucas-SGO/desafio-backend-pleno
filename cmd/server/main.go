@@ -37,7 +37,7 @@ func main() {
 	}
 	log.Println("redis connected")
 
-	repo := notification.NewRepository(database)
+	repo := notification.NewBreakeredRepository(notification.NewRepository(database))
 
 	// Wire service with nil DLQ first, then set worker after both are created.
 	svc := notification.NewService(repo, rdb, nil)
