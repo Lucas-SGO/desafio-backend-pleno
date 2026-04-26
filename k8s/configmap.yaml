@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notificacoes-config
+  namespace: notificacoes
+data:
+  APP_PORT: "8080"
+  GIN_MODE: "release"
+  OTEL_ENDPOINT: ""
