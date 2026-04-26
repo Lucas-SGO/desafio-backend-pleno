@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucaseray/desafio-backend-pleno/internal/config"
 	"github.com/lucaseray/desafio-backend-pleno/internal/db"
+	"github.com/lucaseray/desafio-backend-pleno/internal/dlq"
 	"github.com/lucaseray/desafio-backend-pleno/internal/middleware"
 	"github.com/lucaseray/desafio-backend-pleno/internal/notification"
 	redisclient "github.com/lucaseray/desafio-backend-pleno/internal/redis"
@@ -15,6 +17,7 @@ import (
 )
 
 func main() {
+	ctx := context.Background()
 	cfg := config.Load()
 
 	database, err := db.Open(cfg.DatabaseURL)
@@ -35,12 +38,20 @@ func main() {
 	log.Println("redis connected")
 
 	repo := notification.NewRepository(database)
-	svc := notification.NewService(repo, rdb)
+
+	// Wire service with nil DLQ first, then set worker after both are created.
+	svc := notification.NewService(repo, rdb, nil)
+	dlqWorker := dlq.NewWorker(rdb, svc.DLQProcessFunc())
+	svc.SetDLQWorker(dlqWorker)
+	go dlqWorker.Run(ctx)
 
 	hub := ws.NewHub(rdb)
-	go hub.Run(context.Background())
+	go hub.Run(ctx)
 
 	router := gin.Default()
+	router.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 
 	webhookGroup := router.Group("/webhook", middleware.WebhookSignature(cfg.WebhookSecret))
 	webhook.NewHandler(svc, cfg.CPFHMACSecret).Register(webhookGroup)

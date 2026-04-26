@@ -49,7 +49,7 @@ func buildRouter(repo notification.Repository, repoErr error) *gin.Engine {
 	if repo == nil {
 		repo = &fakeRepo{err: repoErr}
 	}
-	svc := notification.NewService(repo, nil) // nil redis: publish is best-effort
+	svc := notification.NewService(repo, nil, nil) // nil redis+dlq: best-effort
 	h := webhook.NewHandler(svc, "cpf-secret")
 
 	router := gin.New()
