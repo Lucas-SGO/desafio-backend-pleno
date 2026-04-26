@@ -1,4 +1,5 @@
 set dotenv-load
+set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]
 
 default: run
 
@@ -10,9 +11,7 @@ build:
 
 test:
     docker compose up -d postgres redis
-    TEST_DATABASE_URL="postgres://notifications:secret@localhost:5432/notifications?sslmode=disable" \
-    TEST_REDIS_URL="redis://localhost:6379" \
-    go test ./... -v -count=1
+    $env:TEST_DATABASE_URL="postgres://notifications:secret@localhost:5432/notifications?sslmode=disable"; $env:TEST_REDIS_URL="redis://localhost:6379"; go test ./... -v -count=1
 
 lint:
     golangci-lint run ./...
@@ -24,7 +23,7 @@ down:
     docker compose down -v
 
 seed:
-    bash scripts/seed_webhook.sh
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed_webhook.ps1
 
 k6:
     k6 run k6/load_test.js
